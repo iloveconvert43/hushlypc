@@ -94,7 +94,7 @@ export async function POST(req: NextRequest) {
     // ── Generate ImageKit auth ──────────────────────────────
     const token    = crypto.randomUUID()
     const expire   = Math.floor(Date.now() / 1000) + 600  // 10 min
-    const signature = await signImageKitUpload(token, expire)
+    const signature = signImageKitUpload(token, expire)
 
     // ── File path ───────────────────────────────────────────
     // folder = 'posts' (relative, no leading slash)
