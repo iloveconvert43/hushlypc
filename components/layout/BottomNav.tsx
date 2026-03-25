@@ -21,7 +21,7 @@ export default function BottomNav() {
     router.prefetch('/profile')
     router.prefetch('/nearby')
   }, [router])
-  const { unreadCount } = useNotifications()
+  const { notificationUnreadCount } = useNotifications()
   const { profile, isLoggedIn } = useAuth()
 
   // Unread message count — refresh frequently + revalidate on focus
@@ -38,7 +38,7 @@ export default function BottomNav() {
     { href: '/nearby',    icon: Compass,       label: 'Explore',   badge: 0           },
     { href: '/create',    icon: Plus,          label: '',          center: true        },
     { href: '/messages',  icon: MessageCircle, label: 'Messages',  badge: unreadMsgs  },
-    { href: '/profile',   icon: User,          label: 'Profile',   badge: unreadCount },
+    { href: '/profile',   icon: User,          label: 'Profile',   badge: notificationUnreadCount },
   ]
 
   return (
