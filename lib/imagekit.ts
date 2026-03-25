@@ -55,14 +55,16 @@ function mimeToExt(m: string): string {
 }
 
 // ── Server-side HMAC signing ─────────────────────────────────
-export async function signImageKitUpload(token: string, expire: number): Promise<string> {
+// Uses Node.js crypto (same as ImageKit official SDK) — not Web Crypto API
+// which can produce wrong signatures on some Node.js/Edge runtimes
+import crypto from 'crypto'
+
+export function signImageKitUpload(token: string, expire: number): string {
   if (!IMAGEKIT_PRIVATE_KEY) throw new Error('IMAGEKIT_PRIVATE_KEY env var not set')
-  const enc  = new TextEncoder()
-  const key  = await crypto.subtle.importKey('raw', enc.encode(IMAGEKIT_PRIVATE_KEY),
-    { name: 'HMAC', hash: 'SHA-1' }, false, ['sign'])
-  // ImageKit signature: HMAC-SHA1(privateKey, token + expire)  ← token FIRST
-  const sig  = await crypto.subtle.sign('HMAC', key, enc.encode(`${token}${expire}`))
-  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('')
+  return crypto
+    .createHmac('sha1', IMAGEKIT_PRIVATE_KEY)
+    .update(token + expire)
+    .digest('hex')
 }
 
 // ── Facebook-style context transforms ────────────────────────
