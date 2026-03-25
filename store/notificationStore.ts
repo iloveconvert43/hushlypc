@@ -60,7 +60,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
     const { notifications, unreadCount } = get()
     if (unreadCount === 0) return
 
-    // Optimistic update
+    // Optimistic update — immediately clear badges
     set({
       notifications: notifications.map(n => ({ ...n, is_read: true })),
       unreadCount: 0,
@@ -72,11 +72,11 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       await fetch('/api/notifications', {
         method: 'PATCH',
         headers: { Authorization: `Bearer ${session?.access_token ?? ''}` } })
-      // Clear the flag after a short delay to allow DB to propagate
-      setTimeout(() => set({ _markingRead: false } as any), 2000)
+      // Keep the guard flag for 5s to let DB propagate + realtime settle
+      setTimeout(() => set({ _markingRead: false } as any), 5000)
     } catch {
-      set({ _markingRead: false } as any)
-      // Revert
+      setTimeout(() => set({ _markingRead: false } as any), 500)
+      // Revert on error
       get().fetchNotifications()
     }
   },
