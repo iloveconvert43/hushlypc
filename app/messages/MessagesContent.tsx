@@ -426,8 +426,8 @@ function ChatArea({ userId }: { userId: string }) {
     if (profile?.id) {
       api.patch('/api/messages/send', { conversation_with: userId })
         .then(() => {
-          // Revalidate conversations list so unread badge updates immediately
-          globalMutate('/api/messages/conversations')
+          // Small delay to let DB propagate, then refresh badge
+          setTimeout(() => globalMutate('/api/messages/conversations'), 300)
         })
         .catch(() => {})
     }
@@ -454,9 +454,9 @@ function ChatArea({ userId }: { userId: string }) {
         filter:`receiver_id=eq.${profile.id}` },
         (p: any) => {
           if (p.new?.sender_id === userId) mutate()
-          // Also mark as read immediately since conversation is open, and update badge
+          // Mark as read immediately since conversation is open, then update badge
           api.patch('/api/messages/send', { conversation_with: userId }).then(() => {
-            globalMutate('/api/messages/conversations')
+            setTimeout(() => globalMutate('/api/messages/conversations'), 300)
           }).catch(() => {})
         })
       // Listen for messages we sent (confirms delivery)
@@ -515,16 +515,20 @@ function ChatArea({ userId }: { userId: string }) {
     setUploadingFile(true)
     try {
       const { uploadToImageKit } = await import('@/lib/upload')
-      const result = await uploadToImageKit(file, file.type.startsWith('video/') ? 'videos' : 'images')
-      if (!result?.url) throw new Error('Upload failed')
+      const isVideo = file.type.startsWith('video/')
+      const result = await uploadToImageKit(file, isVideo ? 'videos' : 'images')
+      if (!result?.url) throw new Error('Upload returned no URL')
       await api.post('/api/messages/send', {
         to_user_id: userId,
-        content: file.type.startsWith('video/') ? '🎥 Video' : '📷 Photo',
+        content: isVideo ? '🎥 Video' : '📷 Photo',
         image_url: result.url,
-      }, { requireAuth:true })
+      }, { requireAuth: true, timeout: 15000 })
       mutate()
-    } catch { toast.error('Failed to send file') }
-    finally { setUploadingFile(false) }
+      analytics.track('message_file_send')
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to send file'
+      toast.error(msg.includes('sign in') ? 'Please sign in again to send files' : msg)
+    } finally { setUploadingFile(false) }
   }
 
   async function deleteMessage(msgId: string) {
