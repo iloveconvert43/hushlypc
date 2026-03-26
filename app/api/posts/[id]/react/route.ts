@@ -8,7 +8,7 @@ export const maxDuration = 10
  * Also triggers notification to post owner.
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createRouteClient, createAdminClient } from '@/lib/supabase-server'
 import { z } from 'zod'
 import { validate } from '@/lib/validation/schemas'
 
@@ -33,6 +33,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ error: 'Invalid ID format' }, { status: 400 })
   }
   const supabase = createRouteClient()
+  const admin = createAdminClient()
   const profile = await getProfile(supabase, req)
   if (!profile) return NextResponse.json({ error: 'Sign in to react' }, { status: 401 })
 
@@ -44,7 +45,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   const v = validate(reactSchema, rawBody)
   if (!v.success) return NextResponse.json({ error: v.error }, { status: 400 })
 
-  const { data, error } = await supabase.from('reactions')
+  const { data, error } = await admin.from('reactions')
     .upsert(
       { post_id: params.id, user_id: profile.id, type: v.data.type },
       { onConflict: 'post_id,user_id' }
@@ -54,11 +55,11 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   // Update user's tag interests (powers personalized feed)
-  supabase.from('posts').select('user_id, tags').eq('id', params.id).single()
+  admin.from('posts').select('user_id, tags').eq('id', params.id).single()
     .then(async ({ data: post }: any) => {
       if (post?.tags?.length && profile?.id) {
         // Boost interest in tags of posts user reacts to
-        supabase.rpc('update_tag_interest', {
+        admin.rpc('update_tag_interest', {
           p_user_id: profile.id,
           p_tags: post.tags,
           p_delta: 1 }).then(() => {}).catch(() => {})
@@ -66,16 +67,16 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     }).then(() => {}).catch(() => {})
 
   // Update network signals for followers of reactor
-  supabase.rpc('update_network_signals_for_post', {
+  admin.rpc('update_network_signals_for_post', {
     p_actor_id: profile.id, p_post_id: params.id, p_signal: 'friend_reacted'
   }).then(() => {}).catch(() => {})
 
   // Notify post owner + award points + track affinity (non-blocking)
-  supabase.from('posts').select('user_id, tags').eq('id', params.id).single()
+  admin.from('posts').select('user_id, tags').eq('id', params.id).single()
     .then(async ({ data: post }: any) => {
       if (post && post.user_id !== profile.id) {
         // Notification
-        supabase.from('notifications').insert({
+        admin.from('notifications').insert({
           user_id: post.user_id, actor_id: profile.id,
           type: 'new_reaction', post_id: params.id,
           message: 'reacted to your post' }).then(() => {}).catch(() => {})
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
         const { awardPoints } = await import('@/lib/points')
         awardPoints(post.user_id, 'reaction_received', params.id).then(() => {}).catch(() => {})
         // Affinity: reacting = author interest signal (weight 2.0)
-        supabase.rpc('update_user_affinity', {
+        admin.rpc('update_user_affinity', {
           p_user_id: profile.id,
           p_dimension: `author:${post.user_id}`,
           p_delta: 2.0
@@ -91,7 +92,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
         // Affinity: tag interests from this post
         if (post.tags?.length) {
           post.tags.slice(0, 3).forEach((tag: string) => {
-            supabase.rpc('update_user_affinity', {
+            admin.rpc('update_user_affinity', {
               p_user_id: profile.id, p_dimension: `tag:${tag}`, p_delta: 1.0
             }).then(() => {}).catch(() => {})
           })
@@ -104,10 +105,11 @@ export async function POST(req: NextRequest, { params }: Ctx) {
 
 export async function DELETE(req: NextRequest, { params }: Ctx) {
   const supabase = createRouteClient()
+  const admin = createAdminClient()
   const profile = await getProfile(supabase, req)
   if (!profile) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { error } = await supabase.from('reactions')
+  const { error } = await admin.from('reactions')
     .delete().eq('post_id', params.id).eq('user_id', profile.id)
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
