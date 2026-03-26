@@ -126,12 +126,21 @@ function PostContent({ postId }: { postId: string }) {
 
   if (postLoading) return <PostSkeleton />
   if (postError || !post) {
+    const errMsg = postError?.message || postError?.toString() || ''
+    const is401 = errMsg.includes('401') || errMsg.includes('expired') || errMsg.includes('Unauthorized')
+    console.error('[PostDetail] Error loading post:', { postId, error: errMsg, isLoggedIn, hasProfile: !!profile })
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center px-8">
-        <div className="text-4xl mb-4">😕</div>
-        <h3 className="font-semibold mb-2">Post not found</h3>
-        <p className="text-sm text-text-secondary mb-4">It may have been deleted.</p>
-        <Link href="/" className="btn-primary text-sm">Back to feed</Link>
+        <div className="text-4xl mb-4">{is401 ? '🔒' : '😕'}</div>
+        <h3 className="font-semibold mb-2">{is401 ? 'Session expired' : 'Post not found'}</h3>
+        <p className="text-sm text-text-secondary mb-4">
+          {is401 ? 'Please refresh the page or sign in again.' : 'It may have been deleted.'}
+        </p>
+        {is401 ? (
+          <button onClick={() => window.location.reload()} className="btn-primary text-sm">Refresh page</button>
+        ) : (
+          <Link href="/" className="btn-primary text-sm">Back to feed</Link>
+        )}
       </div>
     )
   }
