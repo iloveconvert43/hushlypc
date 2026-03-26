@@ -118,11 +118,21 @@ const FeedCard = memo(function FeedCard({ post, onReshare, priority }: { post: P
   const isOwner = !!(profile && post.user_id === profile.id)
 
   async function handleReact(type: ReactionType) {
-    if (!isLoggedIn) { toast.error('Sign in to react'); return }
+    if (!isLoggedIn) {
+      console.warn('[FeedCard] React blocked: not logged in', { profileExists: !!profile })
+      toast.error('Sign in to react')
+      return
+    }
+    setReactingType(type)
     try {
       analytics.track('post_react', { post_id: post.id, type })
       await optimisticReact(post.id, type, post.user_reaction)
-    } catch (err) { toast.error(getErrorMessage(err)) }
+    } catch (err) {
+      console.error('[FeedCard] React error:', err)
+      toast.error(getErrorMessage(err))
+    } finally {
+      setTimeout(() => setReactingType(null), 300)
+    }
   }
 
   async function handleReveal() {
