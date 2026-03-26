@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 10
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createAdminClient } from '@/lib/supabase-server'
 import { getUserIdFromToken } from '@/lib/jwt'
 import {
   getCachedFeed, setCachedFeed,
@@ -77,7 +77,8 @@ export async function GET(req: NextRequest) {
     })
   }
 
-  const supabase = createRouteClient()
+  // Use admin client to bypass RLS — auth verified via JWT
+  const supabase = createAdminClient()
 
   const filter    = (searchParams.get('filter') || 'global') as FeedFilter
   const limit     = Math.min(parseInt(searchParams.get('limit') || '20'), 30)
@@ -146,8 +147,13 @@ export async function GET(req: NextRequest) {
 
     // ── Base query ──────────────────────────────────────────
     const baseSelect = `
-      id, user_id, content, image_url, video_url, is_anonymous, is_mystery,
-      view_count, reveal_count, city, tags, created_at,
+      id, user_id, content, image_url, video_url, video_thumbnail_url, gif_url,
+      is_anonymous, is_mystery, is_sensitive, scope,
+      view_count, reveal_count, comment_count, reaction_counts, reshare_count,
+      city, tags, created_at,
+      feeling, feeling_emoji, activity, activity_emoji, activity_detail,
+      location_name, is_life_event, life_event_type, life_event_emoji,
+      room_id, reshared_from_id, reshare_comment,
       user:users!user_id(id, username, display_name, avatar_url, is_verified)
     `
 
