@@ -181,7 +181,7 @@ export function useLocation() {
     watchId.current = navigator.geolocation.watchPosition(
       (pos) => applyPosition(pos),
       (err) => { console.warn('[location watch error]', err.code) },
-      { enableHighAccuracy: false, timeout: 20000, maximumAge: 60000 }
+      { enableHighAccuracy: true, timeout: 30000, maximumAge: 30000 }
     )
 
     // Auto-restart watch every 30min (browser may suspend it)
@@ -230,17 +230,37 @@ export function useLocation() {
       return
     }
     setState(s => ({ ...s, loading: true, error: null }))
+
+    // Try high accuracy first (GPS), fallback to low accuracy (WiFi/Cell)
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
-        await applyPosition(pos, true) // force geocode on first grant
-        startWatch() // start continuous tracking
+        await applyPosition(pos, true)
+        startWatch()
       },
-      (err) => {
-        const msg: Record<number, string> = {
-          1: 'Location access denied. Allow it in your browser/device settings.',
-          2: 'Could not detect location. Try moving to an open area.',
-          3: 'Location request timed out. Try again.' }
-        setState(s => ({ ...s, loading: false, error: msg[err.code] ?? 'Location error' }))
+      (highAccErr) => {
+        // If high accuracy fails, try low accuracy as fallback
+        if (highAccErr.code === 2 || highAccErr.code === 3) {
+          navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+              await applyPosition(pos, true)
+              startWatch()
+            },
+            (lowAccErr) => {
+              const msg: Record<number, string> = {
+                1: 'Location access denied. Allow it in your browser/device settings.',
+                2: 'Could not detect location. Check that location services are enabled on your device.',
+                3: 'Location request timed out. Check your internet connection and try again.' }
+              setState(s => ({ ...s, loading: false, error: msg[lowAccErr.code] ?? 'Location error' }))
+            },
+            { enableHighAccuracy: false, timeout: 20000, maximumAge: 120000 }
+          )
+        } else {
+          const msg: Record<number, string> = {
+            1: 'Location access denied. Allow it in your browser/device settings.',
+            2: 'Could not detect location. Check that location services are enabled on your device.',
+            3: 'Location request timed out. Try again.' }
+          setState(s => ({ ...s, loading: false, error: msg[highAccErr.code] ?? 'Location error' }))
+        }
       },
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     )
