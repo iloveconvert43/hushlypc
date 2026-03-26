@@ -19,7 +19,9 @@ const getEnv = (key: string): string =>
 
 export const IMAGEKIT_URL        = getEnv('NEXT_PUBLIC_IMAGEKIT_URL')
 export const IMAGEKIT_PUBLIC_KEY = getEnv('NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY')
-const IMAGEKIT_PRIVATE_KEY       = getEnv('IMAGEKIT_PRIVATE_KEY')
+// NOTE: Private key is read at call time inside signImageKitUpload(),
+// NOT at module init, to ensure it's available on Vercel serverless
+const _IMAGEKIT_PRIVATE_KEY_CACHED = getEnv('IMAGEKIT_PRIVATE_KEY')
 
 // ── Allowed types ────────────────────────────────────────────
 export const ALLOWED_IMAGE_TYPES = [
@@ -55,16 +57,35 @@ function mimeToExt(m: string): string {
 }
 
 // ── Server-side HMAC signing ─────────────────────────────────
-// Uses Node.js crypto (same as ImageKit official SDK) — not Web Crypto API
-// which can produce wrong signatures on some Node.js/Edge runtimes
-import crypto from 'crypto'
-
+// Uses Node.js crypto.createHmac (same as ImageKit official SDK)
+// NOTE: require() used instead of import to prevent client-side bundling issues
+// This function is ONLY called from server API routes (presign endpoint)
 export function signImageKitUpload(token: string, expire: number): string {
-  if (!IMAGEKIT_PRIVATE_KEY) throw new Error('IMAGEKIT_PRIVATE_KEY env var not set')
-  return crypto
-    .createHmac('sha1', IMAGEKIT_PRIVATE_KEY)
-    .update(token + expire)
+  // Read private key at CALL TIME (not module init) to ensure Vercel env is loaded
+  const privateKey = (process.env.IMAGEKIT_PRIVATE_KEY || _IMAGEKIT_PRIVATE_KEY_CACHED || '').trim()
+  if (!privateKey) {
+    console.error('[imagekit] IMAGEKIT_PRIVATE_KEY is empty! Check Vercel environment variables.')
+    throw new Error('IMAGEKIT_PRIVATE_KEY env var not set')
+  }
+
+  // ImageKit signature = HMAC-SHA1(privateKey, token + expire)
+  // Matches ImageKit official SDK: https://github.com/imagekit-developer/imagekit-nodejs
+  const message = `${token}${expire}`
+  const nodeCrypto = require('crypto')
+  const signature = nodeCrypto
+    .createHmac('sha1', privateKey)
+    .update(message)
     .digest('hex')
+
+  console.log('[imagekit] Signature generated:', {
+    tokenPrefix: token.slice(0, 8),
+    expire,
+    sigPrefix: signature.slice(0, 10),
+    keyPrefix: privateKey.slice(0, 12),
+    messageLen: message.length,
+  })
+
+  return signature
 }
 
 // ── Facebook-style context transforms ────────────────────────
@@ -152,11 +173,12 @@ export function buildImageUrl(pathOrUrl: string, opts: {
 
 // ── Deletion ─────────────────────────────────────────────────
 export async function deleteFromImageKit(fileId: string): Promise<void> {
-  if (!fileId || !IMAGEKIT_PRIVATE_KEY) return
+  const privateKey = (process.env.IMAGEKIT_PRIVATE_KEY || _IMAGEKIT_PRIVATE_KEY_CACHED || '').trim()
+  if (!fileId || !privateKey) return
   try {
     await fetch(`https://api.imagekit.io/v1/files/${encodeURIComponent(fileId)}`, {
       method: 'DELETE',
-      headers: { Authorization: `Basic ${Buffer.from(IMAGEKIT_PRIVATE_KEY + ':').toString('base64')}` },
+      headers: { Authorization: `Basic ${Buffer.from(privateKey + ':').toString('base64')}` },
     })
   } catch {}
 }
