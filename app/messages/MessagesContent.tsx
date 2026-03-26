@@ -45,40 +45,82 @@ function useCall(myId: string | null, otherUserId: string | null) {
   const timerRef       = useRef<ReturnType<typeof setInterval>|null>(null)
   const localVideoRef  = useRef<HTMLVideoElement|null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement|null>(null)
+  const pendingCandidates = useRef<RTCIceCandidateInit[]>([])
+  const channelReady   = useRef(false)
 
-  const STUN = { iceServers:[{ urls:'stun:stun.l.google.com:19302' },{ urls:'stun:stun1.l.google.com:19302' }] }
+  // ICE servers — STUN for direct connections + free TURN for NAT traversal
+  const ICE_CONFIG = { iceServers:[
+    { urls:'stun:stun.l.google.com:19302' },
+    { urls:'stun:stun1.l.google.com:19302' },
+    { urls:'stun:stun.relay.metered.ca:80' },
+    { urls:'turn:a.relay.metered.ca:80', username:'e8dd65c92aee94c2bdfcf5a1', credential:'uR6VHbl/bMzcPOKJ' },
+    { urls:'turn:a.relay.metered.ca:80?transport=tcp', username:'e8dd65c92aee94c2bdfcf5a1', credential:'uR6VHbl/bMzcPOKJ' },
+    { urls:'turn:a.relay.metered.ca:443', username:'e8dd65c92aee94c2bdfcf5a1', credential:'uR6VHbl/bMzcPOKJ' },
+    { urls:'turns:a.relay.metered.ca:443?transport=tcp', username:'e8dd65c92aee94c2bdfcf5a1', credential:'uR6VHbl/bMzcPOKJ' },
+  ]}
+
+  function createPC() {
+    const pc = new RTCPeerConnection(ICE_CONFIG)
+    pc.ontrack = (e) => {
+      if (remoteVideoRef.current && e.streams[0]) remoteVideoRef.current.srcObject = e.streams[0]
+    }
+    pc.onicecandidate = (e) => {
+      if (e.candidate && channelRef.current && channelReady.current)
+        channelRef.current.send({ type:'broadcast', event:'ice-candidate', payload:{ from:myId, candidate:e.candidate } })
+    }
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') setCallState('connected')
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') endCall(false)
+    }
+    return pc
+  }
 
   useEffect(() => {
     if (!myId || !otherUserId) return
+    channelReady.current = false
     const channelId = [myId, otherUserId].sort().join('-')
-    const ch = supabase.channel(`call:${channelId}`)
+    const ch = supabase.channel(`call:${channelId}`, {
+      config: { broadcast: { self: false } }
+    })
       .on('broadcast', { event:'call-offer' }, async ({ payload }: any) => {
         if (payload.from === myId) return
         setCallType(payload.callType || 'audio')
         setCallState('incoming')
         try {
-          if (!pcRef.current) {
-            pcRef.current = new RTCPeerConnection(STUN)
-            pcRef.current.ontrack = (e) => {
-              if (remoteVideoRef.current && e.streams[0]) remoteVideoRef.current.srcObject = e.streams[0]
-            }
-            pcRef.current.onicecandidate = (e) => {
-              if (e.candidate && channelRef.current)
-                channelRef.current.send({ type:'broadcast', event:'ice-candidate', payload:{ from:myId, candidate:e.candidate } })
-            }
+          if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
+          const pc = createPC()
+          pcRef.current = pc
+          await pc.setRemoteDescription(new RTCSessionDescription(payload.offer))
+          // Flush any ICE candidates that arrived before the offer
+          for (const c of pendingCandidates.current) {
+            await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
           }
-          await pcRef.current.setRemoteDescription(new RTCSessionDescription(payload.offer))
-        } catch(err) { console.error('setRemoteDesc', err) }
+          pendingCandidates.current = []
+        } catch(err) { console.error('[call] setRemoteDesc', err) }
       })
       .on('broadcast', { event:'call-answer' }, async ({ payload }: any) => {
         if (payload.from === myId) return
-        if (pcRef.current) await pcRef.current.setRemoteDescription(new RTCSessionDescription(payload.answer))
-        setCallState('connected')
-        startCallTimer()
+        try {
+          if (pcRef.current) {
+            await pcRef.current.setRemoteDescription(new RTCSessionDescription(payload.answer))
+            // Flush pending candidates
+            for (const c of pendingCandidates.current) {
+              await pcRef.current.addIceCandidate(new RTCIceCandidate(c)).catch(() => {})
+            }
+            pendingCandidates.current = []
+          }
+          setCallState('connected')
+          startCallTimer()
+        } catch(err) { console.error('[call] setAnswer', err) }
       })
       .on('broadcast', { event:'ice-candidate' }, async ({ payload }: any) => {
         if (payload.from === myId) return
-        if (pcRef.current && payload.candidate) await pcRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate))
+        if (pcRef.current && pcRef.current.remoteDescription) {
+          await pcRef.current.addIceCandidate(new RTCIceCandidate(payload.candidate)).catch(() => {})
+        } else {
+          // Queue candidates that arrive before offer/answer
+          pendingCandidates.current.push(payload.candidate)
+        }
       })
       .on('broadcast', { event:'call-end' }, ({ payload }: any) => {
         if (payload.from === myId) return
@@ -90,14 +132,25 @@ function useCall(myId: string | null, otherUserId: string | null) {
       })
       .on('broadcast', { event:'request-offer' }, ({ payload }: any) => {
         if (payload.from === myId) return
+        // Caller resends offer when receiver requests it (e.g. after navigating to messages page)
         if (pcRef.current && channelRef.current) {
           const offer = pcRef.current.localDescription
           if (offer) channelRef.current.send({ type:'broadcast', event:'call-offer', payload:{ from:myId, offer, callType } })
         }
       })
-      .subscribe()
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          channelReady.current = true
+          console.log('[call] Channel subscribed:', channelId)
+        }
+      })
     channelRef.current = ch
-    return () => { supabase.removeChannel(ch); channelRef.current = null }
+    return () => {
+      supabase.removeChannel(ch)
+      channelRef.current = null
+      channelReady.current = false
+      pendingCandidates.current = []
+    }
   }, [myId, otherUserId]) // eslint-disable-line
 
   function startCallTimer() {
@@ -109,48 +162,104 @@ function useCall(myId: string | null, otherUserId: string | null) {
   }
 
   async function startCall(type: 'audio'|'video') {
-    if (!myId || !otherUserId || !channelRef.current) { toast.error('Cannot start call'); return }
+    if (!myId || !otherUserId) { toast.error('Cannot start call'); return }
     setCallType(type); setCallState('calling')
     try {
-      const pc = new RTCPeerConnection(STUN)
-      pcRef.current = pc
+      // Request mic/camera FIRST before anything else
       const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video: type==='video' ? { facingMode:'user' } : false })
       localStream.current = stream
+
+      // Wait for channel to be ready
+      if (!channelReady.current) {
+        await new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (channelReady.current) { clearInterval(check); resolve() }
+          }, 100)
+          setTimeout(() => { clearInterval(check); resolve() }, 3000) // max 3s wait
+        })
+      }
+
+      const pc = createPC()
+      pcRef.current = pc
       stream.getTracks().forEach(t => pc.addTrack(t, stream))
       if (localVideoRef.current && type==='video') localVideoRef.current.srcObject = stream
-      pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0] }
-      pc.onicecandidate = (e) => {
-        if (e.candidate && channelRef.current)
-          channelRef.current.send({ type:'broadcast', event:'ice-candidate', payload:{ from:myId, candidate:e.candidate } })
-      }
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') endCall(false)
-      }
+
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
-      channelRef.current.send({ type:'broadcast', event:'call-offer', payload:{ from:myId, offer, callType:type } })
-      // Also send to receiver personal channel
+
+      // Send offer on the shared call channel
+      if (channelRef.current) {
+        channelRef.current.send({ type:'broadcast', event:'call-offer', payload:{ from:myId, offer, callType:type } })
+      }
+
+      // Also send to receiver's personal channel (for GlobalCallUI)
       const rcvCh = supabase.channel(`user-calls:${otherUserId}`)
       await rcvCh.subscribe()
       rcvCh.send({ type:'broadcast', event:'call-offer', payload:{ from:myId, offer, callType:type } })
       setTimeout(() => supabase.removeChannel(rcvCh), 5000)
+
+      // Trigger push notification via API
       fetch('/api/calls/ring', { method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ recipient_id:otherUserId, call_type:type }) }).catch(()=>{})
+
+      // Auto-timeout after 45 seconds if no answer
+      setTimeout(() => {
+        if (pcRef.current && !pcRef.current.remoteDescription) {
+          toast('No answer')
+          endCall(true)
+        }
+      }, 45000)
     } catch(err: any) {
-      toast.error(err?.name==='NotAllowedError' ? 'Mic/camera permission denied' : 'Could not start call')
+      console.error('[call] startCall error:', err)
+      if (err?.name === 'NotAllowedError') {
+        toast.error('Mic/camera permission denied. Allow it in browser settings and try again.')
+      } else if (err?.name === 'NotFoundError') {
+        toast.error('No microphone found. Connect a mic and try again.')
+      } else if (err?.name === 'NotReadableError') {
+        toast.error('Mic/camera is in use by another app. Close it and try again.')
+      } else {
+        toast.error('Could not start call: ' + (err?.message || 'Unknown error'))
+      }
+      localStream.current?.getTracks().forEach(t => t.stop())
+      localStream.current = null
       setCallState('idle')
     }
   }
 
   async function answerCall() {
-    if (!channelRef.current) { toast.error('Call connection lost'); setCallState('idle'); return }
     try {
+      // Wait for channel to be ready
+      if (!channelReady.current) {
+        await new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (channelReady.current) { clearInterval(check); resolve() }
+          }, 100)
+          setTimeout(() => { clearInterval(check); resolve() }, 3000)
+        })
+      }
+      if (!channelRef.current) { toast.error('Call connection lost'); setCallState('idle'); return }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video: callType==='video' ? { facingMode:'user' } : false })
       localStream.current = stream
-      if (!pcRef.current) {
-        toast.error('Call expired. Ask caller to call again.')
-        stream.getTracks().forEach(t => t.stop()); localStream.current = null; setCallState('idle'); return
+
+      if (!pcRef.current || !pcRef.current.remoteDescription) {
+        // Peer connection not ready — request the caller to resend their offer
+        if (channelRef.current) {
+          channelRef.current.send({ type:'broadcast', event:'request-offer', payload:{ from:myId } })
+        }
+        // Wait up to 5s for the offer to arrive
+        const gotOffer = await new Promise<boolean>((resolve) => {
+          const check = setInterval(() => {
+            if (pcRef.current?.remoteDescription) { clearInterval(check); resolve(true) }
+          }, 200)
+          setTimeout(() => { clearInterval(check); resolve(false) }, 5000)
+        })
+        if (!gotOffer || !pcRef.current) {
+          toast.error('Call expired. Ask caller to call again.')
+          stream.getTracks().forEach(t => t.stop()); localStream.current = null; setCallState('idle'); return
+        }
       }
+
       stream.getTracks().forEach(t => pcRef.current!.addTrack(t, stream))
       if (localVideoRef.current && callType==='video') localVideoRef.current.srcObject = stream
       const answer = await pcRef.current.createAnswer()
@@ -159,7 +268,8 @@ function useCall(myId: string | null, otherUserId: string | null) {
       setCallState('connected')
       startCallTimer()
     } catch(err: any) {
-      toast.error(err?.name==='NotAllowedError' ? 'Mic permission denied' : 'Could not answer call')
+      console.error('[call] answerCall error:', err)
+      toast.error(err?.name==='NotAllowedError' ? 'Mic permission denied. Allow it in settings.' : 'Could not answer call')
       endCall(true)
     }
   }
@@ -176,6 +286,7 @@ function useCall(myId: string | null, otherUserId: string | null) {
   function cleanup() {
     localStream.current?.getTracks().forEach(t => t.stop())
     localStream.current = null; pcRef.current?.close(); pcRef.current = null
+    pendingCandidates.current = []
     if (localVideoRef.current) localVideoRef.current.srcObject = null
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
   }
@@ -404,7 +515,7 @@ function ChatArea({ userId }: { userId: string }) {
 
   const { data: msgsRes, mutate } = useSWR(
     `/api/messages/thread/${userId}`, swrFetcher,
-    { revalidateOnFocus: true, keepPreviousData: true }
+    { revalidateOnFocus: true, keepPreviousData: true, refreshInterval: 4000 }
   )
   const { data: permRes, mutate: mutatePermission } = useSWR(
     `/api/messages/permission?user_id=${userId}`, swrFetcher,
@@ -531,6 +642,12 @@ function ChatArea({ userId }: { userId: string }) {
     } finally { setUploadingFile(false) }
   }
 
+  async function sendMultipleFiles(files: FileList) {
+    for (let i = 0; i < files.length; i++) {
+      await sendFile(files[i])
+    }
+  }
+
   async function deleteMessage(msgId: string) {
     try {
       await fetch('/api/messages/send', { method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message_id:msgId }) })
@@ -644,8 +761,8 @@ function ChatArea({ userId }: { userId: string }) {
         <div className="px-3 py-2.5 border-t border-border flex items-end gap-2 bg-bg flex-shrink-0 safe-bottom">
           <label className={cn("w-9 h-9 rounded-full flex items-center justify-center cursor-pointer transition-all flex-shrink-0",
             uploadingFile ? "bg-primary/15" : "bg-bg-card2 hover:bg-bg-card border border-border")}>
-            <input type="file" className="hidden" accept="image/*,video/*" disabled={uploadingFile}
-              onChange={e => { const f = e.target.files?.[0]; if (f) sendFile(f); e.target.value = '' }} />
+            <input type="file" className="hidden" accept="image/*,video/*" multiple disabled={uploadingFile}
+              onChange={e => { const files = e.target.files; if (files && files.length > 1) sendMultipleFiles(files); else if (files?.[0]) sendFile(files[0]); e.target.value = '' }} />
             {uploadingFile ? <Loader2 size={15} className="animate-spin text-primary" /> : <ImageIcon size={15} className="text-text-muted" />}
           </label>
           <textarea ref={textareaRef} value={message} rows={1}
