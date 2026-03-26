@@ -13,8 +13,71 @@ import {
 type FeedFilter = 'global' | 'nearby' | 'city' | 'friends' | 'room'
 
 export async function GET(req: NextRequest) {
-  const supabase = createRouteClient()
   const { searchParams } = new URL(req.url)
+
+  // Health check: /api/feed?health=1
+  if (searchParams.get('health') === '1') {
+    const check = (key: string) => {
+      const val = process.env[key]
+      return { key, set: !!val, length: val?.length ?? 0, prefix: val ? val.slice(0, 12) + '...' : '(empty)' }
+    }
+
+    // Generate REAL ImageKit auth credentials and test them
+    const crypto = require('crypto')
+    const pk = (process.env.IMAGEKIT_PRIVATE_KEY || '').trim()
+    const pubKey = process.env.NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY || ''
+    const token = crypto.randomUUID()
+    const expire = Math.floor(Date.now() / 1000) + 600
+
+    let signatureTest = 'not tested'
+    let liveTestResult = 'not tested'
+
+    if (pk) {
+      const sig = crypto.createHmac('sha1', pk).update(`${token}${expire}`).digest('hex')
+      signatureTest = `OK (sig=${sig.slice(0, 10)}... token=${token.slice(0, 8)}... expire=${expire})`
+
+      // Actually test with ImageKit API to see if signature is accepted
+      try {
+        const testForm = new URLSearchParams()
+        testForm.append('publicKey', pubKey)
+        testForm.append('signature', sig)
+        testForm.append('expire', String(expire))
+        testForm.append('token', token)
+        testForm.append('fileName', 'test.txt')
+        testForm.append('file', 'data:text/plain;base64,dGVzdA==')
+
+        const ikRes = await fetch('https://upload.imagekit.io/api/v1/files/upload', {
+          method: 'POST',
+          body: testForm,
+        })
+        const ikData = await ikRes.json()
+        if (ikRes.ok) {
+          liveTestResult = `SUCCESS: uploaded as ${ikData.url?.slice(0, 50)}`
+        } else {
+          liveTestResult = `FAIL (${ikRes.status}): ${ikData.message || JSON.stringify(ikData)}`
+        }
+      } catch (e: any) {
+        liveTestResult = `ERROR: ${e.message}`
+      }
+    } else {
+      signatureTest = 'FAIL: IMAGEKIT_PRIVATE_KEY is empty'
+    }
+
+    return NextResponse.json({
+      status: 'ok', node: process.version,
+      env: [
+        check('NEXT_PUBLIC_SUPABASE_URL'), check('NEXT_PUBLIC_SUPABASE_ANON_KEY'),
+        check('SUPABASE_SERVICE_ROLE_KEY'), check('NEXT_PUBLIC_IMAGEKIT_URL'),
+        check('NEXT_PUBLIC_IMAGEKIT_PUBLIC_KEY'), check('IMAGEKIT_PRIVATE_KEY'),
+        check('UPSTASH_REDIS_REST_URL'), check('UPSTASH_REDIS_REST_TOKEN'),
+      ],
+      signatureTest, liveTestResult,
+      debugInfo: { publicKeyLen: pubKey.length, privateKeyLen: pk.length, token: token.slice(0, 12), expire },
+      timestamp: new Date().toISOString(),
+    })
+  }
+
+  const supabase = createRouteClient()
 
   const filter    = (searchParams.get('filter') || 'global') as FeedFilter
   const limit     = Math.min(parseInt(searchParams.get('limit') || '20'), 30)
