@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 10
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createRouteClient, createAdminClient } from '@/lib/supabase-server'
 
 export async function GET(req: NextRequest) {
   try {
@@ -17,7 +17,8 @@ export async function GET(req: NextRequest) {
       .from('users').select('id').eq('auth_id', sessionUser.id).single()
     if (!profile) return NextResponse.json({ data: [] })
 
-    const { data, error } = await supabase
+    const admin = createAdminClient()
+    const { data, error } = await admin
       .from('notifications')
       .select('*, actor:users!actor_id(id, username, display_name, avatar_url)')
       .eq('user_id', profile.id)
@@ -45,7 +46,8 @@ export async function PATCH(req: NextRequest) {
       .from('users').select('id').eq('auth_id', sessionUser.id).single()
     if (!profile) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-    const { error } = await supabase
+    const admin = createAdminClient()
+    const { error } = await admin
       .from('notifications')
       .update({ is_read: true })
       .eq('user_id', profile.id)
@@ -74,7 +76,8 @@ export async function DELETE(req: NextRequest) {
     const { data: me } = await supabase.from('users').select('id').eq('auth_id', sessionUser.id).single()
     if (!me) return NextResponse.json({ ok: true })
 
-    await supabase.from('notifications').delete().eq('user_id', me.id)
+    const admin = createAdminClient()
+    await admin.from('notifications').delete().eq('user_id', me.id)
     return NextResponse.json({ ok: true })
   } catch (err: any) {
     return NextResponse.json({ error: 'Failed' }, { status: 500 })
