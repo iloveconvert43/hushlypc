@@ -45,6 +45,8 @@ function useCall(myId: string | null, otherUserId: string | null) {
   const timerRef       = useRef<ReturnType<typeof setInterval>|null>(null)
   const localVideoRef  = useRef<HTMLVideoElement|null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement|null>(null)
+  const remoteAudioRef = useRef<HTMLAudioElement|null>(null)
+  const answerLock     = useRef(false)
   const pendingCandidates = useRef<RTCIceCandidateInit[]>([])
   const channelReady   = useRef(false)
 
@@ -62,7 +64,15 @@ function useCall(myId: string | null, otherUserId: string | null) {
   function createPC() {
     const pc = new RTCPeerConnection(ICE_CONFIG)
     pc.ontrack = (e) => {
-      if (remoteVideoRef.current && e.streams[0]) remoteVideoRef.current.srcObject = e.streams[0]
+      const stream = e.streams[0]
+      if (!stream) return
+      // Video calls: attach to video element
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream
+      // Audio calls: ALWAYS attach to hidden audio element (video element may not exist)
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = stream
+        remoteAudioRef.current.play().catch(() => {})
+      }
     }
     pc.onicecandidate = (e) => {
       if (e.candidate && channelRef.current && channelReady.current)
@@ -227,6 +237,9 @@ function useCall(myId: string | null, otherUserId: string | null) {
   }
 
   async function answerCall() {
+    // Mutex lock — prevent double-answer from auto-answer + manual click
+    if (answerLock.current) return
+    answerLock.current = true
     try {
       // Wait for channel to be ready
       if (!channelReady.current) {
@@ -270,6 +283,7 @@ function useCall(myId: string | null, otherUserId: string | null) {
     } catch(err: any) {
       console.error('[call] answerCall error:', err)
       toast.error(err?.name==='NotAllowedError' ? 'Mic permission denied. Allow it in settings.' : 'Could not answer call')
+      answerLock.current = false
       endCall(true)
     }
   }
@@ -286,9 +300,10 @@ function useCall(myId: string | null, otherUserId: string | null) {
   function cleanup() {
     localStream.current?.getTracks().forEach(t => t.stop())
     localStream.current = null; pcRef.current?.close(); pcRef.current = null
-    pendingCandidates.current = []
+    pendingCandidates.current = []; answerLock.current = false
     if (localVideoRef.current) localVideoRef.current.srcObject = null
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
+    if (remoteAudioRef.current) { remoteAudioRef.current.srcObject = null; remoteAudioRef.current.pause() }
   }
   function toggleMute() { localStream.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled }); setIsMuted(m => !m) }
   function toggleVideo() { localStream.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled }); setIsVideoOff(v => !v) }
@@ -298,18 +313,22 @@ function useCall(myId: string | null, otherUserId: string | null) {
   return {
     callState, callType, isMuted, isVideoOff,
     callDuration: formatDuration(callDuration),
-    localVideoRef, remoteVideoRef, channelRef,
+    localVideoRef, remoteVideoRef, remoteAudioRef, channelRef,
     startCall, answerCall, declineCall, endCall, toggleMute, toggleVideo, setIncomingCall,
   }
 }
 
 // ── Call Overlay ───────────────────────────────────────────────
-function CallOverlay({ call, otherUser }: { call: ReturnType<typeof useCall>; otherUser: any }) {
+function CallOverlay({ call, otherUser, autoAnswering }: { call: ReturnType<typeof useCall>; otherUser: any; autoAnswering?: boolean }) {
   const { callState, callType, isMuted, isVideoOff, callDuration,
-          localVideoRef, remoteVideoRef, answerCall, declineCall, endCall, toggleMute, toggleVideo } = call
+          localVideoRef, remoteVideoRef, remoteAudioRef, answerCall, declineCall, endCall, toggleMute, toggleVideo } = call
   if (callState === 'idle') return null
+  // When auto-answering (from GlobalCallUI accept), treat 'incoming' like 'calling' — no Accept/Decline
+  const showConnecting = autoAnswering && callState === 'incoming'
   return (
     <div className="fixed inset-0 z-[300] bg-gradient-to-b from-gray-900 to-black flex flex-col items-center justify-between py-16 px-6">
+      {/* Hidden audio element — CRITICAL for audio-only calls. Always present. */}
+      <audio ref={remoteAudioRef} autoPlay playsInline className="hidden" />
       {callType === 'video' && callState === 'connected' && (
         <video ref={remoteVideoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover" />
       )}
@@ -326,7 +345,7 @@ function CallOverlay({ call, otherUser }: { call: ReturnType<typeof useCall>; ot
         <div className="text-center">
           <p className="text-white text-2xl font-bold">{otherUser?.display_name || otherUser?.username}</p>
           <p className="text-white/60 text-sm mt-1 animate-pulse">
-            {callState==='calling' ? 'Calling…' : callState==='incoming' ? `Incoming ${callType} call` : callDuration}
+            {showConnecting ? 'Connecting…' : callState==='calling' ? 'Calling…' : callState==='incoming' ? `Incoming ${callType} call` : callDuration}
           </p>
         </div>
       </div>
@@ -334,7 +353,7 @@ function CallOverlay({ call, otherUser }: { call: ReturnType<typeof useCall>; ot
         <video ref={localVideoRef} autoPlay playsInline muted className="absolute bottom-36 right-4 w-28 h-40 rounded-2xl object-cover border-2 border-white/20 z-20" />
       )}
       <div className="relative z-10 flex items-center gap-8">
-        {callState === 'incoming' ? (
+        {callState === 'incoming' && !showConnecting ? (
           <>
             <div className="flex flex-col items-center gap-2">
               <button onClick={declineCall} className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 flex items-center justify-center text-white shadow-2xl active:scale-90 transition-all">
@@ -445,6 +464,12 @@ const ConversationList = memo(function ConversationList({ activeUserId }: { acti
 })
 
 // ── Message Bubble ─────────────────────────────────────────────
+function isVideoUrl(url: string) {
+  if (!url) return false
+  const lower = url.toLowerCase()
+  return /\.(mp4|webm|mov|avi|mkv|m4v|ogg)(\?|$)/i.test(lower) || lower.includes('/video')
+}
+
 function MessageBubble({ msg, isMine, onDelete, otherUser }: any) {
   const [hovered, setHovered] = useState(false)
   if (msg.content === 'Message deleted') {
@@ -454,22 +479,27 @@ function MessageBubble({ msg, isMine, onDelete, otherUser }: any) {
       </div>
     )
   }
+  const hasMedia = !!msg.image_url
+  const isVideo = hasMedia && (msg.content === '🎥 Video' || isVideoUrl(msg.image_url))
   return (
     <div className={cn("flex gap-2 items-end group", isMine ? "flex-row-reverse" : "")}
       onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}>
       {!isMine && <Avatar user={otherUser} size={28} className="flex-shrink-0 mb-1" />}
       <div className={cn(
         "max-w-[72%] rounded-2xl text-sm leading-relaxed break-words shadow-sm",
-        msg.image_url ? "p-0 overflow-hidden" : "px-3.5 py-2.5",
+        hasMedia ? "p-0 overflow-hidden" : "px-3.5 py-2.5",
         isMine ? "bg-primary text-white rounded-br-sm" : "bg-bg-card border border-border/50 text-text rounded-bl-sm"
       )}>
-        {msg.image_url && (
+        {hasMedia && isVideo ? (
+          <video src={msg.image_url} controls playsInline preload="metadata"
+            className="max-w-[260px] max-h-[340px] rounded-t-2xl bg-black" />
+        ) : hasMedia ? (
           <a href={msg.image_url} target="_blank" rel="noreferrer">
             <img src={msg.image_url} alt="" className="max-w-[260px] max-h-[340px] object-cover" loading="lazy" />
           </a>
-        )}
+        ) : null}
         {msg.content && msg.content !== '📷 Photo' && msg.content !== '🎥 Video' && (
-          <p className={msg.image_url ? "px-3.5 py-2" : ""}>{msg.content}</p>
+          <p className={hasMedia ? "px-3.5 py-2" : ""}>{msg.content}</p>
         )}
         <div className={cn("flex items-center gap-1 text-[10px] mt-0.5",
           msg.image_url ? "px-3.5 pb-2" : "",
@@ -533,24 +563,53 @@ function ChatArea({ userId }: { userId: string }) {
   // Scroll on mount + mark messages as read
   useEffect(() => {
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior:'auto' }), 100)
-    // Mark messages as read when conversation opens (use api.patch for auth headers)
+    // Mark messages as read when conversation opens
     if (profile?.id) {
+      // 1. OPTIMISTIC: Immediately clear badge in SWR cache (no server roundtrip)
+      globalMutate('/api/messages/conversations', (current: any) => {
+        if (!current?.data) return current
+        return {
+          ...current,
+          data: current.data.map((c: any) =>
+            c.other_user?.id === userId ? { ...c, unread_count: 0 } : c
+          )
+        }
+      }, false) // false = don't revalidate yet
+
+      // 2. SERVER: Mark as read in database
       api.patch('/api/messages/send', { conversation_with: userId })
         .then(() => {
-          // Small delay to let DB propagate, then refresh badge
-          setTimeout(() => globalMutate('/api/messages/conversations'), 300)
+          // 3. REVALIDATE: Refetch from server to confirm
+          setTimeout(() => globalMutate('/api/messages/conversations'), 500)
+          setTimeout(() => globalMutate('/api/messages/conversations'), 2000)
         })
-        .catch(() => {})
+        .catch((err) => {
+          console.error('[messages] mark-as-read failed:', err)
+          // Revalidate anyway to get correct state
+          globalMutate('/api/messages/conversations')
+        })
     }
   }, [userId, profile?.id])
 
-  // Auto-answer from GlobalCallUI
+  // Auto-answer from GlobalCallUI — user already accepted in the overlay,
+  // so skip the Accept/Decline UI and directly answer the call
+  const autoAnswered = useRef(false)
   useEffect(() => {
-    if (autoAnswer && callState === 'idle' && profile?.id) {
-      const t = setTimeout(() => {
-        setIncomingCall(autoCallType)
-        callChannelRef?.current?.send({ type:'broadcast', event:'request-offer', payload:{ from:profile.id } })
-      }, 800)
+    if (autoAnswer && callState === 'idle' && profile?.id && !autoAnswered.current) {
+      autoAnswered.current = true
+      // Set call type first (needed by answerCall for getUserMedia)
+      setIncomingCall(autoCallType)
+      // Wait for channel to be ready, then request offer and auto-answer
+      const t = setTimeout(async () => {
+        // Request the caller to resend their offer (we just navigated here)
+        if (callChannelRef?.current) {
+          callChannelRef.current.send({ type:'broadcast', event:'request-offer', payload:{ from:profile.id } })
+        }
+        // Give time for offer to arrive, then auto-answer (skips the UI)
+        setTimeout(() => {
+          call.answerCall()
+        }, 1500)
+      }, 1000)
       return () => clearTimeout(t)
     }
   }, [autoAnswer, profile?.id]) // eslint-disable-line
@@ -565,9 +624,16 @@ function ChatArea({ userId }: { userId: string }) {
         filter:`receiver_id=eq.${profile.id}` },
         (p: any) => {
           if (p.new?.sender_id === userId) mutate()
-          // Mark as read immediately since conversation is open, then update badge
+          // OPTIMISTIC: Immediately clear badge in SWR cache
+          globalMutate('/api/messages/conversations', (current: any) => {
+            if (!current?.data) return current
+            return { ...current, data: current.data.map((c: any) =>
+              c.other_user?.id === userId ? { ...c, unread_count: 0 } : c
+            )}
+          }, false)
+          // SERVER: Mark as read in database
           api.patch('/api/messages/send', { conversation_with: userId }).then(() => {
-            setTimeout(() => globalMutate('/api/messages/conversations'), 300)
+            globalMutate('/api/messages/conversations')
           }).catch(() => {})
         })
       // Listen for messages we sent (confirms delivery)
@@ -576,7 +642,17 @@ function ChatArea({ userId }: { userId: string }) {
         (p: any) => { if (p.new?.receiver_id === userId) mutate() })
       // Listen for read receipts and updates
       .on('postgres_changes', { event:'UPDATE', schema:'public', table:'direct_messages',
-        filter:`receiver_id=eq.${profile.id}` }, () => { mutate(); globalMutate('/api/messages/conversations') })
+        filter:`receiver_id=eq.${profile.id}` }, () => {
+          mutate()
+          // Optimistic clear then revalidate
+          globalMutate('/api/messages/conversations', (current: any) => {
+            if (!current?.data) return current
+            return { ...current, data: current.data.map((c: any) =>
+              c.other_user?.id === userId ? { ...c, unread_count: 0 } : c
+            )}
+          }, false)
+          setTimeout(() => globalMutate('/api/messages/conversations'), 500)
+        })
       .on('postgres_changes', { event:'UPDATE', schema:'public', table:'direct_messages',
         filter:`sender_id=eq.${profile.id}` }, () => mutate())
       .on('broadcast', { event:'typing' }, ({ payload }: any) => {
@@ -659,7 +735,7 @@ function ChatArea({ userId }: { userId: string }) {
 
   return (
     <div className="flex flex-col h-full relative bg-bg">
-      <CallOverlay call={call} otherUser={otherUser} />
+      <CallOverlay call={call} otherUser={otherUser} autoAnswering={autoAnswer} />
 
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-border bg-bg/98 backdrop-blur flex-shrink-0 safe-top">
