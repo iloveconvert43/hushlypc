@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 10
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createAdminClient } from '@/lib/supabase-server'
 import { createPostSchema, validate } from '@/lib/validation/schemas'
 import { sanitizeText, sanitizeTags } from '@/lib/sanitize'
 import { rateLimit } from '@/lib/security'
@@ -28,15 +28,15 @@ function checkRateLimit(userId: string, maxPerHour = 20): boolean {
 
 export async function POST(req: NextRequest) {
   try {
-  const supabase = createRouteClient()
   const { getUserIdFromToken: _getUID } = await import('@/lib/jwt')
     const _authId = _getUID(req.headers.get('authorization'))
-    const sessionUser = _authId ? { id: _authId } : null
-    // (auth.getUser replaced with JWT decode)
-  if (!sessionUser) return NextResponse.json({ error: 'Please sign in to post' }, { status: 401 })
+  if (!_authId) return NextResponse.json({ error: 'Please sign in to post' }, { status: 401 })
+
+  // Use admin client to bypass RLS — auth verified via JWT
+  const supabase = createAdminClient()
 
   const { data: profile } = await supabase
-    .from('users').select('id, is_banned').eq('auth_id', sessionUser.id).single()
+    .from('users').select('id, is_banned').eq('auth_id', _authId).single()
   if (!profile) return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
   if (profile.is_banned) return NextResponse.json({ error: 'Account suspended' }, { status: 403 })
 
