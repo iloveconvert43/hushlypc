@@ -1,8 +1,7 @@
 export const dynamic = 'force-dynamic'
 export const maxDuration = 10
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
-import { createClient } from '@supabase/supabase-js'
+import { createRouteClient, createAdminClient } from '@/lib/supabase-server'
 import { isValidUUID } from '@/lib/security'
 
 export async function POST(req: NextRequest) {
@@ -20,14 +19,12 @@ export async function POST(req: NextRequest) {
     if (!me) return NextResponse.json({ ok: true })
 
     // Broadcast decline signal to caller's channel
-    const adminClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
+    const admin = createAdminClient()
     const channelId = [caller_id, me.id].sort().join('-')
-    const ch = adminClient.channel(`call:${channelId}`)
+    const ch = admin.channel(`call:${channelId}`)
+    await ch.subscribe()
     await ch.send({ type: 'broadcast', event: 'call-decline', payload: { from: me.id } })
-    await adminClient.removeChannel(ch)
+    await admin.removeChannel(ch)
 
     return NextResponse.json({ ok: true })
   } catch { return NextResponse.json({ ok: true }) }
