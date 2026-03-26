@@ -2,11 +2,11 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 10
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createAdminClient } from '@/lib/supabase-server'
 
 export async function GET(req: NextRequest) {
   try {
-    const supabase = createRouteClient()
+    const supabase = createAdminClient()
     const { getUserIdFromToken } = await import('@/lib/jwt')
     const authUserId = getUserIdFromToken(req.headers.get('authorization'))
     if (!authUserId) return NextResponse.json({ data: [] })
@@ -15,9 +15,12 @@ export async function GET(req: NextRequest) {
       .from('users').select('id').eq('auth_id', authUserId).single()
     if (!me) return NextResponse.json({ data: [] })
 
+    // Use admin client to bypass RLS — ensures we get ALL messages in conversations
+    const admin = createAdminClient()
+
     // Fast: get latest message per conversation using efficient query
     // Get distinct conversation partners with their latest message
-    const { data: msgs, error } = await supabase
+    const { data: msgs, error } = await admin
       .from('direct_messages')
       .select('id,sender_id,receiver_id,content,created_at,is_read')
       .or(`sender_id.eq.${me.id},receiver_id.eq.${me.id}`)
@@ -44,7 +47,7 @@ export async function GET(req: NextRequest) {
 
     // Batch fetch user profiles
     const otherIds = [...convMap.keys()]
-    const { data: users } = await supabase
+    const { data: users } = await admin
       .from('users')
       .select('id,username,display_name,avatar_url,is_verified')
       .in('id', otherIds)
