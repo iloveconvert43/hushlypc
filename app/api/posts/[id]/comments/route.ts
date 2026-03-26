@@ -6,7 +6,7 @@ export const maxDuration = 10
  * POST /api/posts/[id]/comments — Create comment with Zod validation
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { createRouteClient } from '@/lib/supabase-server'
+import { createRouteClient, createAdminClient } from '@/lib/supabase-server'
 import { createCommentSchema, validate } from '@/lib/validation/schemas'
 import { sanitizeInput, isValidUUID, rateLimit, getClientIP } from '@/lib/security'
 
@@ -21,11 +21,12 @@ export async function GET(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ error: 'Invalid post ID' }, { status: 400 })
   }
   try {
-    const supabase = createRouteClient()
+    // Use admin client to bypass RLS for reading comments (public content)
+    const admin = createAdminClient()
     const userSelect = 'id,username,full_name,display_name,avatar_url,is_verified'
 
     // Fetch ALL non-deleted comments for this post in one query
-    const { data: allComments, error } = await supabase
+    const { data: allComments, error } = await admin
       .from('comments')
       .select(`*, user:users(${userSelect})`)
       .eq('post_id', params.id)
@@ -94,14 +95,16 @@ export async function POST(req: NextRequest, { params }: Ctx) {
 
     // Validate parent_id belongs to this post (prevent cross-post reply injection)
     if (parent_id) {
-      const { data: parent } = await supabase
+      const admin = createAdminClient()
+      const { data: parent } = await admin
         .from('comments').select('post_id').eq('id', parent_id).single()
       if (!parent || parent.post_id !== params.id) {
         return NextResponse.json({ error: 'Invalid parent comment' }, { status: 400 })
       }
     }
 
-    const { data: comment, error } = await supabase
+    const admin = createAdminClient()
+    const { data: comment, error } = await admin
       .from('comments')
       .insert({
         post_id: params.id,
@@ -115,11 +118,11 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     if (error) throw error
 
     // Notify post owner (non-blocking, skip self-notifications)
-    const { data: post } = await supabase
+    const { data: post } = await admin
       .from('posts').select('user_id').eq('id', params.id).single()
 
     if (post && post.user_id !== profile.id) {
-      supabase.from('notifications').insert({
+      admin.from('notifications').insert({
         user_id: post.user_id,
         actor_id: is_anonymous ? null : profile.id,
         type: 'new_comment',
@@ -129,10 +132,10 @@ export async function POST(req: NextRequest, { params }: Ctx) {
 
     // Also notify parent comment owner (for replies)
     if (parent_id) {
-      const { data: parentComment } = await supabase
+      const { data: parentComment } = await admin
         .from('comments').select('user_id').eq('id', parent_id).single()
       if (parentComment && parentComment.user_id !== profile.id) {
-        supabase.from('notifications').insert({
+        admin.from('notifications').insert({
           user_id: parentComment.user_id,
           actor_id: is_anonymous ? null : profile.id,
           type: 'new_comment',
@@ -146,20 +149,20 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   awardPoints(profile.id, 'comment_posted', comment.id).then(() => {}).catch(() => {})
 
   // Update affinity: commenting = strong signal (3x weight)
-  supabase.from('posts').select('user_id, tags, is_anonymous').eq('id', params.id).single()
+  admin.from('posts').select('user_id, tags, is_anonymous').eq('id', params.id).single()
     .then(({ data: post }: any) => {
       if (!post) return
       // Tag affinity
       if (post.tags?.length) {
         for (const tag of post.tags.slice(0, 5)) {
-          supabase.rpc('update_user_affinity', {
+          admin.rpc('update_user_affinity', {
             p_user_id: profile.id, p_dimension: `tag:${tag}`, p_delta: 3.0
           }).then(() => {}).catch(() => {})
         }
       }
       // Author affinity
       if (post.user_id && !post.is_anonymous && post.user_id !== profile.id) {
-        supabase.rpc('update_user_affinity', {
+        admin.rpc('update_user_affinity', {
           p_user_id: profile.id, p_dimension: `author:${post.user_id}`, p_delta: 3.0
         }).then(() => {}).catch(() => {})
       }
